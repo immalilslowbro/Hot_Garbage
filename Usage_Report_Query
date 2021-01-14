@@ -1,0 +1,117 @@
+SET NOCOUNT ON;
+----Error Checking
+IF OBJECT_ID('tempdb..##TempTimeRanges1') IS NOT NULL
+	Drop Table ##TempTimeRanges1;
+
+----Variables
+Declare @sdt int
+Declare @edt int
+DECLARE @date DATETIME = GETDATE();
+Declare @Interval int
+Declare @Count int
+/*
+@Count will set the counter for the amount of days to go back. 
+The '@Count' variable can be understood more easily with this expression: Z = X - Y
+Z = Number of days in Month report is running against e.g.(July Usage Report 7/1/XXXX - 7/31/XXXX is 31 Days) 
+X = Last date of current Month - 2 Months e.g.(Current Month is August (8 - 2 = 6) Last day of Month 6 (June) is 6/30/XXXX)
+Y = Last date of current Month - 1 Month e.g.(Current Month is August (8 - 1 = 7) Last day of Month 7 (July) is 7/31/XXXX)
+By modifying the value of the integer provided to ...(EOMONTH(@date, -X)) we can tell the script to go back further than 30/31 days.
+@Count = (SELECT DATEDIFF(Day,(EOMONTH(@date, -3)),(EOMONTH(@date, -1)))) will translate to (5/31/XXXX - 7/31/XXXX)
+*/
+Set @Count = (SELECT DATEDIFF(Day,(EOMONTH(@date, -2)),(EOMONTH(@date, -1))))
+Set @Interval = 0
+/*
+@sdt/@edt are converted from actual dates into integers because the Genesis Database Engineers are dumb and use float values in the final WHERE clause: line 96/97.
+These values are technically backwards in this logic but in the query it matches up better and is less confusing.
+sdt = Integer of difference 1900/1/1 and current date e.g.(8/4/2020 = 44047.00)
+edt = Integer of difference 1900/1/1 and (current date - 1 month) e.g.(7/4/2020 = 44016.00)
+By changing @edt's month,-X, SYSDATETIME... we can increase the date range we want to pull from
+*/
+Set @sdt = (Select convert(int,(DATEDIFF(day, '1900/1/1',SYSDATETIME()))))
+Set @edt = (Select convert(int,(DATEDIFF(day, '1900/1/1',(DATEADD(month,-1,SYSDATETIME()))))));
+
+----Temp Table Creation
+Create Table ##TempTimeRanges1 (
+	Source char(140) NOT NULL,
+	sdt datetime NOT NULL,
+	edt datetime NOT NULL,
+	Type int NOT NULL,
+	PRIMARY KEY (Source, sdt, Type)
+);
+While @Count > 0
+Begin 
+	Insert Into ##TempTimeRanges1
+	Values ('UPSTXRRK-GW3_Admin', (Select Convert(date,DateAdd(Day,(@Interval -2),GetDate()))), (Select Convert(date,DateAdd(Day,@Interval,GetDate()))), -1);
+	Set @Count = @Count + -1;
+	Set @Interval = @Interval + -1;
+End;
+----Query for sheet Total_Usage
+;WITH     
+            ThisQueryTempTimeTable (sdt, edt) 
+            AS 
+            ( 
+            SELECT sdt, edt  
+            From  
+                ##TempTimeRanges1 
+            Where  
+                [Source] = 'UPSTXRRK-GW3_Admin'  
+                AND [Type] = -1  
+            ) 
+            Select 
+ 	            ThisQueryTempTimeTable.sdt as 'Period Beginning', 
+ 	            IsNull(ResultsTable.TotalTime, 0) as 'Total Time', 
+ 	            IsNull(ResultsTable.TotalCount, 0) as 'Total Count of Calls' 
+            from 
+ 	            ThisQueryTempTimeTable left outer join 
+ 	            (Select 
+ 	                ThisQueryTempTimeTable.sdt as 'SDT', 
+ 	                Sum(dbo.MillisecondsInDateRange( dbo.InlineMaxDate(StartDT, sdt), dbo.InlineMinDate(EndDT, edt))/1000.0) as 'TotalTime', 
+ 	                Sum(case when startdt >= sdt and startdt < edt then 1 else 0 end) as 'TotalCount' 
+ 	            from 
+ 	                ARC_Calls_ReportViewResources 
+ 	                JOIN ThisQueryTempTimeTable ON 
+                        ThisQueryTempTimeTable.sdt < ARC_Calls_ReportViewResources.EndDT 
+                        AND ThisQueryTempTimeTable.edt >= ARC_Calls_ReportViewResources.StartDT
+                Where
+                    (
+                        1 = 0
+                        OR (1 = 1 and DataRevert = 0)
+                        OR (1 = 2 and DataRevert = 1)
+                    )
+                    AND
+                    (
+                         	0 = 0
+                         	OR (0 = 1 AND RadioData = 0)
+                         	OR (0 = 2 AND RadioData = 1)
+                    )
+                    AND
+                    (
+                        (
+                            ([group] = 1 AND 1 = 1)
+                            OR ([private] = 1 AND 1 = 1)
+                            OR ([interconnect] = 1 AND 1 = 1)
+                        )
+                        OR
+                        (
+                            (1 = 0 AND 1 = 0 AND 1 = 0)
+                            AND
+                            ([group] <> 1 AND Private <> 1 AND Interconnect <> 1)             
+                        )
+                    )
+                    AND ARC_Calls_ReportViewResources.StartDT < @sdt
+                    AND ARC_Calls_ReportViewResources.EndDT >= @edt
+ 	            group by 
+ 	                ThisQueryTempTimeTable.sdt
+ 	            ) as ResultsTable  
+ 	            on ResultsTable.sdt = ThisQueryTempTimeTable.sdt
+            order by 
+ 	            ThisQueryTempTimeTable.sdt
+;
+----Resetting Variables and Table
+Set @date = NULL
+Set @Count = NULL
+Set @Interval = NULL
+Set @edt = NULL
+Set @sdt = NULL
+Drop Table ##TempTimeRanges1
+SET NOCOUNT OFF;
